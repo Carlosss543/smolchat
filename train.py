@@ -1,10 +1,13 @@
 import torch
 import argparse
+from contextlib import nullcontext
 from model import smolTransformer
 from data import DataLoaderLite
 import time
 import math
 from utils import init_distributed_mode
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
 
 
 def get_args_parser():
@@ -12,7 +15,7 @@ def get_args_parser():
 
     parser.add_argument("--sequence_length", type=int, default=1024)
     parser.add_argument("--global_batch_size", type=int, default=2**19) # 2**19 ~500k tokens per batch
-    parser.add_argument("--micro_batch_size", type=int, default=8) # 16
+    parser.add_argument("--micro_batch_size", type=int, default=16)
     parser.add_argument("--weight_decay", type=float, default=0.1)
 
     parser.add_argument("--lr", type=float, default=6e-4)
@@ -32,19 +35,26 @@ def main(args):
 
 
     # --- distributed training setup ---
-    # init_distributed_mode(args)
-    args.device = "cuda"
+    init_distributed_mode(args)
 
 
     # --- load data ---
-    train_loader = DataLoaderLite(B=args.micro_batch_size, T=args.sequence_length)
-    grad_accum_steps = args.global_batch_size // (args.micro_batch_size * args.sequence_length)
+    train_loader = DataLoaderLite(B=args.micro_batch_size, T=args.sequence_length, process_rank=args.ddp_rank, world_size=args.ddp_world_size)
+
+    assert args.global_batch_size % (args.micro_batch_size * args.sequence_length * args.ddp_world_size) == 0, "Global batch size must be divisible by micro batch size * sequence length * number of distributed processes"
+    grad_accum_steps = args.global_batch_size // (args.micro_batch_size * args.sequence_length * args.ddp_world_size)
 
 
     # --- initialize model ---
     model = smolTransformer().to(args.device)
-    # model = torch.compile(model)
-    print(f"Number of model parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.4f}M")
+
+    model = torch.compile(model)
+
+    if args.distributed:
+        model = DDP(model, device_ids=[args.ddp_local_rank])
+
+    if args.master_process:
+        print(f"Number of model parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.4f}M")
 
 
     # --- optimizer, criterion, gradient scaler for fp16 ---
@@ -85,20 +95,22 @@ def main(args):
         t0 = time.time()
         model.train()
 
-        loss_accum = 0.0
+        loss_accum = torch.tensor(0.0, device=args.device)
 
-        for _ in range(grad_accum_steps):
+        for micro_step in range(grad_accum_steps):
             x, y = train_loader.next_batch()
             x, y = x.to(args.device), y.to(args.device)
 
-            with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
-                logits = model(x)
-                loss = criterion_train(logits.view(-1, logits.size(-1)), y.view(-1))
+            sync_context = (model.no_sync() if args.distributed and micro_step < grad_accum_steps - 1 else nullcontext())
+            with sync_context:
+                with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+                    logits = model(x)
+                    loss = criterion_train(logits.view(-1, logits.size(-1)), y.view(-1))
 
-            loss = loss / grad_accum_steps
-            loss_accum += loss.item()
+                loss = loss / grad_accum_steps
+                loss_accum += loss.detach()
 
-            scaler.scale(loss).backward() # loss * S → gradients * S
+                scaler.scale(loss).backward() # loss * S → gradients * S
 
         scaler.unscale_(optimizer) # unscale the gradients, i.e. divide by S
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -106,12 +118,20 @@ def main(args):
         scaler.update() # dynamically adjust the scaling factor S
         optimizer.zero_grad(set_to_none=True)
 
+        if args.distributed:
+            dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
+
         torch.cuda.synchronize()
         t1 = time.time()
-        tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps) / (t1 - t0)
-        print(f"Step {i}: loss = {loss_accum:.4f}, lr = {optimizer.param_groups[0]['lr']:.6f}, grad_norm = {norm:.4f}, time = {(t1 - t0)*1000:.4f}ms, tokens/sec = {tokens_per_sec:.2f}")
+        tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps * args.ddp_world_size) / (t1 - t0)
+
+        if args.master_process:
+            print(f"Step {i}: loss = {loss_accum:.4f}, lr = {optimizer.param_groups[0]['lr']:.6f}, grad_norm = {norm:.4f}, time = {(t1 - t0)*1000:.4f}ms, tokens/sec = {tokens_per_sec:.2f}")
 
         lr_scheduler.step()
+
+    if args.distributed:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
