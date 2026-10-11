@@ -1,41 +1,37 @@
+import numpy as np
 import torch
-import tiktoken
+import glob
+from torch.utils.data import Dataset, DataLoader
+from torch.utils.data.distributed import DistributedSampler
 
 
-class DataLoaderLite:
+class TokenDataset(Dataset):
 
-    def __init__(self, B, T, process_rank, world_size):
-        self.B = B
-        self.T = T
-        self.process_rank = process_rank
-        self.world_size = world_size
+    def __init__(self, path_to_dir, split, sequence_length):
+        self.files = sorted(glob.glob(f"{path_to_dir}/{split}_*.npy"))
+        self.T = sequence_length
+        lens = [np.load(f, mmap_mode="r").shape[0] for f in self.files] # np.load(f, mmap_mode="r") does not load the entire array into memory but only maps it to disk
+        n_chunks = [(l - 1) // self.T for l in lens]
+        self.cum = np.cumsum([0] + n_chunks)
+        self._mm = None
 
-        # at init load tokens from disk and store them in memory
-        with open('input.txt', 'r') as f:
-            text = f.read()
+    def __len__(self):
+        return int(self.cum[-1])
 
-        enc = tiktoken.get_encoding('gpt2')
-        tokens = enc.encode(text)
-        self.tokens = torch.tensor(tokens)
+    def __getitem__(self, idx):
+        if self._mm is None:
+            self._mm = [np.load(f, mmap_mode="r") for f in self.files]
+        s = int(np.searchsorted(self.cum, idx, side="right")) - 1 # index of the shard containing the chunk
+        i = (idx - self.cum[s]) * self.T # starting index of the chunk within the shard
+        chunk = torch.from_numpy(self._mm[s][i:i + self.T + 1].astype(np.int64))
+        return chunk[:-1], chunk[1:]
 
-        if self.process_rank == 0:
-            print(f"loaded {len(self.tokens)} tokens")
-            print(f"1 epoch = {len(self.tokens) // (self.B * self.T)} batches")
 
-        self.current_position = self.B * self.T * self.process_rank
+def make_loader(path_to_dir, split, batch_size, sequence_length, distributed=False, rank=0, world_size=1, workers=4):
+    dataset = TokenDataset(path_to_dir, split, sequence_length)
 
-    def next_batch(self):
-        B, T = self.B, self.T
+    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=(split=="train"), drop_last=True) if distributed else None
 
-        buf = self.tokens[self.current_position : self.current_position+B*T+1]
+    data_loader = DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=workers, drop_last=True)
 
-        x = (buf[:-1]).view(B, T) # inputs
-        y = (buf[1:]).view(B, T) # targets
-
-        self.current_position += B * T * self.world_size # advance the position in the tensor
-
-        # if loading the next batch would be out of bounds, reset
-        if self.current_position + (B * T * self.world_size + 1) > len(self.tokens):
-            self.current_position = self.B * self.T * self.process_rank
-
-        return x, y
+    return data_loader, sampler

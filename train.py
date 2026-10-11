@@ -2,7 +2,7 @@ import torch
 import argparse
 from contextlib import nullcontext
 from model import smolTransformer
-from data import DataLoaderLite
+from data import make_loader
 import time
 import math
 from utils import init_distributed_mode
@@ -13,14 +13,16 @@ import torch.distributed as dist
 def get_args_parser():
     parser = argparse.ArgumentParser()
 
+    parser.add_argument("--data_dir", type=str, required=True)
+
     parser.add_argument("--sequence_length", type=int, default=1024)
     parser.add_argument("--global_batch_size", type=int, default=2**19) # 2**19 ~500k tokens per batch
     parser.add_argument("--micro_batch_size", type=int, default=16)
     parser.add_argument("--weight_decay", type=float, default=0.1)
 
     parser.add_argument("--lr", type=float, default=6e-4)
-    parser.add_argument("--warmup_steps", type=int, default=10)
-    parser.add_argument("--max_steps", type=int, default=50)
+    parser.add_argument("--warmup_steps", type=int, default=715) # TRY TO REDUCE IT LATER
+    parser.add_argument("--max_steps", type=int, default=None)
 
     return parser
 
@@ -39,7 +41,7 @@ def main(args):
 
 
     # --- load data ---
-    train_loader = DataLoaderLite(B=args.micro_batch_size, T=args.sequence_length, process_rank=args.ddp_rank, world_size=args.ddp_world_size)
+    train_loader, _ = make_loader(path_to_dir=args.data_dir, split="train", batch_size=args.micro_batch_size, sequence_length=args.sequence_length, distributed=args.distributed, rank=args.ddp_rank, world_size=args.ddp_world_size)
 
     assert args.global_batch_size % (args.micro_batch_size * args.sequence_length * args.ddp_world_size) == 0, "Global batch size must be divisible by micro batch size * sequence length * number of distributed processes"
     grad_accum_steps = args.global_batch_size // (args.micro_batch_size * args.sequence_length * args.ddp_world_size)
@@ -72,6 +74,10 @@ def main(args):
 
 
     # --- learning rate scheduler with warmup and cosine decay ---
+    max_steps = args.max_steps if args.max_steps is not None else len(train_loader) // grad_accum_steps
+    if args.master_process:
+        print(f"max_steps = {max_steps}, grad_accum_steps = {grad_accum_steps}")
+
     def lr_lambda(step):
         max_lr = args.lr
         min_lr = max_lr * 0.1
@@ -79,11 +85,11 @@ def main(args):
         if step < args.warmup_steps:
             return (step + 1) / args.warmup_steps
 
-        elif step > args.max_steps:
+        elif step > max_steps:
             return min_lr / max_lr
 
         else:
-            decay_ratio = (step - args.warmup_steps) / (args.max_steps - args.warmup_steps)
+            decay_ratio = (step - args.warmup_steps) / (max_steps - args.warmup_steps)
             coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
             return (min_lr + coeff * (max_lr - min_lr)) / max_lr
 
@@ -91,17 +97,20 @@ def main(args):
 
 
     # --- training loop ---
-    for i in range(args.max_steps):
-        t0 = time.time()
-        model.train()
+    model.train()
+    train_iter = iter(train_loader)
 
+    for step in range(max_steps):
+        t0 = time.time()
+        
         loss_accum = torch.tensor(0.0, device=args.device)
 
         for micro_step in range(grad_accum_steps):
-            x, y = train_loader.next_batch()
+            x, y = next(train_iter)
             x, y = x.to(args.device), y.to(args.device)
 
-            sync_context = (model.no_sync() if args.distributed and micro_step < grad_accum_steps - 1 else nullcontext())
+            sync_context = (model.no_sync() if args.distributed and (micro_step+1) < grad_accum_steps else nullcontext())
+
             with sync_context:
                 with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
                     logits = model(x)
@@ -122,11 +131,11 @@ def main(args):
             dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
 
         torch.cuda.synchronize()
-        t1 = time.time()
-        tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps * args.ddp_world_size) / (t1 - t0)
+        dt = time.time() - t0
+        tokens_per_sec = (args.micro_batch_size * args.sequence_length * grad_accum_steps * args.ddp_world_size) / dt
 
         if args.master_process:
-            print(f"Step {i}: loss = {loss_accum:.4f}, lr = {optimizer.param_groups[0]['lr']:.6f}, grad_norm = {norm:.4f}, time = {(t1 - t0)*1000:.4f}ms, tokens/sec = {tokens_per_sec:.2f}")
+            print(f"Step {step}: loss = {loss_accum:.4f}, lr = {optimizer.param_groups[0]['lr']:.4e}, grad_norm = {norm:.4f}, tokens/sec = {tokens_per_sec:.2f}")
 
         lr_scheduler.step()
 
