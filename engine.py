@@ -65,28 +65,3 @@ def evaluate(model, loader, criterion, args, grad_accum_steps, val_steps):
         print(f"Validation loss = {val_loss_accum:.4f}")
 
     return val_loss_accum.item()
-
-
-@torch.no_grad()
-def generate(model, enc, prompt, args, num_examples=1, max_new_tokens=100, temperature=1.0, top_k=50):
-    model.eval()
-    ids = torch.tensor([enc.encode_ordinary(prompt)], device=args.device).repeat(num_examples, 1)
-
-    sample_rng = torch.Generator(device=args.device)
-    sample_rng.manual_seed(42+args.ddp_rank)
-
-    for _ in range(max_new_tokens):
-        with torch.autocast("cuda", dtype=torch.float16):
-            logits = model(ids[:, -args.sequence_length:]) # (B, T, vocab_size)
-        logits = logits[:, -1, :] / temperature # (B, vocab_size)
-        probs = logits.softmax(dim=-1)
-
-        topk_probs, topk_idx = torch.topk(probs, top_k, dim=-1) # (B, k), (B, k)
-        choice = torch.multinomial(topk_probs, num_samples=1, generator=sample_rng) # (B, 1), indices in [0, k[
-        next_id = torch.gather(topk_idx, -1, choice) # (B, 1), vrai id de token
-
-        ids = torch.cat([ids, next_id], dim=1)
-
-    print([enc.decode(seq.tolist()) for seq in ids])
-
-    return [enc.decode(seq.tolist()) for seq in ids]

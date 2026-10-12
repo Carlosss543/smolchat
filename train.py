@@ -3,11 +3,12 @@ import argparse
 from model import smolTransformer
 from data import make_loader
 import math
-from utils import init_distributed_mode
+from utils import init_distributed_mode, generate, eval_hellaswag
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
-from engine import train_one_step, evaluate, generate
+from engine import train_one_step, evaluate
 import tiktoken
+from datasets import load_dataset
 
 
 def get_args_parser():
@@ -45,6 +46,8 @@ def main(args):
     val_loader, _ = make_loader(path_to_dir=args.data_dir, split="val", batch_size=args.micro_batch_size, sequence_length=args.sequence_length, distributed=args.distributed, rank=args.ddp_rank, world_size=args.ddp_world_size)
 
     tokenizer = tiktoken.get_encoding("gpt2")
+
+    hs_examples = list(load_dataset("Rowan/hellaswag", split="validation"))
 
 
     # --- compute number of training steps ---
@@ -113,9 +116,10 @@ def main(args):
 
         lr_scheduler.step()
 
-        if step % 100 == 0:
+        if step % 100 == 0 or step == max_steps - 1:
             evaluate(model, val_loader, criterion_val, args, grad_accum_steps, val_steps=1)
             generate(model, tokenizer, "France is", args, num_examples=1, max_new_tokens=30, temperature=1.0)
+            eval_hellaswag(model, tokenizer, args, hs_examples)
             model.train()
 
     if args.distributed:
