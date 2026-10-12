@@ -3,6 +3,7 @@ import torch
 import torch.nn.functional as F
 from torch.distributed import init_process_group
 import torch.distributed as dist
+import wandb
 
 
 def init_distributed_mode(args):
@@ -50,7 +51,7 @@ def generate(model, enc, prompt, args, num_examples=1, max_new_tokens=100, tempe
 
 
 @torch.no_grad()
-def eval_hellaswag(model, tokenizer, args, examples, num_examples_used=None):
+def eval_hellaswag(model, tokenizer, args, examples, step, num_examples_used=None):
     model.eval()
 
     correct = torch.tensor(0, device=args.device)
@@ -97,6 +98,7 @@ def eval_hellaswag(model, tokenizer, args, examples, num_examples_used=None):
     acc = correct / total if total > 0 else 0.0
 
     if args.master_process:
+        wandb.log({"step": step, "hellaswag_acc": acc})
         print(f"HellaSwag accuracy = {acc:.4f}")
 
     return acc

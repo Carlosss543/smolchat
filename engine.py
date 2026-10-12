@@ -2,6 +2,7 @@ import torch
 import torch.distributed as dist
 from contextlib import nullcontext
 import time
+import wandb
 
 
 def train_one_step(model, train_iter, optimizer, scaler, criterion_train, args, grad_accum_steps, step):
@@ -39,11 +40,12 @@ def train_one_step(model, train_iter, optimizer, scaler, criterion_train, args, 
     tokens_per_sec = (args.micro_batch_size * args.sequence_length * grad_accum_steps * args.ddp_world_size) / dt
 
     if args.master_process:
+        wandb.log({"step": step, "train_loss": loss_accum.item(), "lr": optimizer.param_groups[0]['lr'], "grad_norm": norm, "tokens_per_sec": tokens_per_sec})
         print(f"Step {step}: loss = {loss_accum:.4f}, lr = {optimizer.param_groups[0]['lr']:.4e}, grad_norm = {norm:.4f}, tokens/sec = {tokens_per_sec:.2f}")
 
 
 @torch.no_grad()
-def evaluate(model, loader, criterion, args, grad_accum_steps, val_steps):
+def evaluate(model, loader, criterion, args, grad_accum_steps, step, val_steps):
     model.eval()
     val_iter = iter(loader)
     val_loss_accum = torch.tensor(0.0, device=args.device)
@@ -62,6 +64,7 @@ def evaluate(model, loader, criterion, args, grad_accum_steps, val_steps):
         dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
 
     if args.master_process:
+        wandb.log({"step": step, "val_loss": val_loss_accum.item()})
         print(f"Validation loss = {val_loss_accum:.4f}")
 
     return val_loss_accum.item()

@@ -1,6 +1,6 @@
 __pycache__/
+wandb_logs/
+training_checkpoints/
 
-input.txt
-tests.ipynb
-
-README.md
+job_script.sh
+training_logs/
