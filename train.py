@@ -1,13 +1,13 @@
 import torch
 import argparse
-from contextlib import nullcontext
 from model import smolTransformer
 from data import make_loader
-import time
 import math
 from utils import init_distributed_mode
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
+from engine import train_one_step, evaluate, generate
+import tiktoken
 
 
 def get_args_parser():
@@ -42,13 +42,24 @@ def main(args):
 
     # --- load data ---
     train_loader, _ = make_loader(path_to_dir=args.data_dir, split="train", batch_size=args.micro_batch_size, sequence_length=args.sequence_length, distributed=args.distributed, rank=args.ddp_rank, world_size=args.ddp_world_size)
+    val_loader, _ = make_loader(path_to_dir=args.data_dir, split="val", batch_size=args.micro_batch_size, sequence_length=args.sequence_length, distributed=args.distributed, rank=args.ddp_rank, world_size=args.ddp_world_size)
 
+    tokenizer = tiktoken.get_encoding("gpt2")
+
+
+    # --- compute number of training steps ---
     assert args.global_batch_size % (args.micro_batch_size * args.sequence_length * args.ddp_world_size) == 0, "Global batch size must be divisible by micro batch size * sequence length * number of distributed processes"
     grad_accum_steps = args.global_batch_size // (args.micro_batch_size * args.sequence_length * args.ddp_world_size)
 
+    available_steps = len(train_loader) // grad_accum_steps
+    max_steps = min(args.max_steps, available_steps) if args.max_steps is not None else available_steps
+
+    if args.master_process:
+        print(f"max_steps = {max_steps}, grad_accum_steps = {grad_accum_steps}")
+
 
     # --- initialize model ---
-    model = smolTransformer().to(args.device)
+    model = smolTransformer(sequence_length=args.sequence_length).to(args.device)
 
     model = torch.compile(model)
 
@@ -69,15 +80,12 @@ def main(args):
     )
 
     criterion_train = torch.nn.CrossEntropyLoss()
+    criterion_val = torch.nn.CrossEntropyLoss()
 
     scaler = torch.amp.GradScaler("cuda")
 
 
     # --- learning rate scheduler with warmup and cosine decay ---
-    max_steps = args.max_steps if args.max_steps is not None else len(train_loader) // grad_accum_steps
-    if args.master_process:
-        print(f"max_steps = {max_steps}, grad_accum_steps = {grad_accum_steps}")
-
     def lr_lambda(step):
         max_lr = args.lr
         min_lr = max_lr * 0.1
@@ -85,7 +93,7 @@ def main(args):
         if step < args.warmup_steps:
             return (step + 1) / args.warmup_steps
 
-        elif step > max_steps:
+        elif step >= max_steps:
             return min_lr / max_lr
 
         else:
@@ -101,43 +109,14 @@ def main(args):
     train_iter = iter(train_loader)
 
     for step in range(max_steps):
-        t0 = time.time()
-        
-        loss_accum = torch.tensor(0.0, device=args.device)
-
-        for micro_step in range(grad_accum_steps):
-            x, y = next(train_iter)
-            x, y = x.to(args.device), y.to(args.device)
-
-            sync_context = (model.no_sync() if args.distributed and (micro_step+1) < grad_accum_steps else nullcontext())
-
-            with sync_context:
-                with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
-                    logits = model(x)
-                    loss = criterion_train(logits.view(-1, logits.size(-1)), y.view(-1))
-
-                loss = loss / grad_accum_steps
-                loss_accum += loss.detach()
-
-                scaler.scale(loss).backward() # loss * S → gradients * S
-
-        scaler.unscale_(optimizer) # unscale the gradients, i.e. divide by S
-        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        scaler.step(optimizer) # unscale if not already done + check for inf/NaN in gradients
-        scaler.update() # dynamically adjust the scaling factor S
-        optimizer.zero_grad(set_to_none=True)
-
-        if args.distributed:
-            dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
-
-        torch.cuda.synchronize()
-        dt = time.time() - t0
-        tokens_per_sec = (args.micro_batch_size * args.sequence_length * grad_accum_steps * args.ddp_world_size) / dt
-
-        if args.master_process:
-            print(f"Step {step}: loss = {loss_accum:.4f}, lr = {optimizer.param_groups[0]['lr']:.4e}, grad_norm = {norm:.4f}, tokens/sec = {tokens_per_sec:.2f}")
+        train_one_step(model, train_iter, optimizer, scaler, criterion_train, args, grad_accum_steps, step)
 
         lr_scheduler.step()
+
+        if step % 100 == 0:
+            evaluate(model, val_loader, criterion_val, args, grad_accum_steps, val_steps=1)
+            generate(model, tokenizer, "France is", args, num_examples=1, max_new_tokens=30, temperature=1.0)
+            model.train()
 
     if args.distributed:
         dist.destroy_process_group()

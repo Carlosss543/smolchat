@@ -122,9 +122,9 @@ class Transformer(nn.Module):
         return logits
 
 
-def smolTransformer():
+def smolTransformer(sequence_length):
     config = Config(
-        sequence_length=1024,
+        sequence_length=sequence_length,
         num_layers=12,
         num_heads=12,
         embed_dim=768,
