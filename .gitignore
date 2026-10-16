@@ -1,6 +1,6 @@
 __pycache__/
 wandb_logs/
-training_checkpoints/
+pretraining_checkpoints/
 
 job_script.sh
 training_logs/

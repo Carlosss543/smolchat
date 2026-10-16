@@ -92,7 +92,7 @@ def main(args):
         print(f"Number of model parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.4f}M")
 
 
-    # --- optimizer, criterion, gradient scaler for fp16 ---
+    # --- optimizer and gradient scaler for fp16 ---
     decay_params = [p for p in model.parameters() if p.requires_grad and p.dim() >= 2] # weights and embeddings 
     nodecay_params = [p for p in model.parameters() if p.requires_grad and p.dim() < 2] # biases and layernorms
 
@@ -100,9 +100,6 @@ def main(args):
         [{'params': decay_params, 'weight_decay': args.weight_decay}, {'params': nodecay_params, 'weight_decay': 0.0}],
         lr=args.lr, betas=(0.9, 0.95), fused=True
     )
-
-    criterion_train = torch.nn.CrossEntropyLoss()
-    criterion_val = torch.nn.CrossEntropyLoss()
 
     scaler = torch.amp.GradScaler("cuda")
 
@@ -161,11 +158,11 @@ def main(args):
         next(train_iter)
 
     for step in range(starting_step, max_steps):
-        train_one_step(model, train_iter, optimizer, scaler, criterion_train, args, grad_accum_steps, step)
+        train_one_step(model, train_iter, optimizer, scaler, args, grad_accum_steps, step)
         lr_scheduler.step()
 
         if (step+1) % 200 == 0 or step == max_steps - 1:
-            evaluate(model, val_loader, criterion_val, args, grad_accum_steps, step=step, val_steps=1)
+            evaluate(model, val_loader, args, grad_accum_steps, step=step, val_steps=1)
             generate(model, tokenizer, "France is", args, num_examples=1, max_new_tokens=30, temperature=1.0)
             eval_hellaswag(model, tokenizer, args, hs_examples, step=step)
             model.train()

@@ -5,7 +5,7 @@ import time
 import wandb
 
 
-def train_one_step(model, train_iter, optimizer, scaler, criterion_train, args, grad_accum_steps, step):
+def train_one_step(model, train_iter, optimizer, scaler, args, grad_accum_steps, step):
     t0 = time.time()
     
     loss_accum = torch.tensor(0.0, device=args.device)
@@ -18,8 +18,7 @@ def train_one_step(model, train_iter, optimizer, scaler, criterion_train, args, 
 
         with sync_context:
             with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
-                logits = model(x)
-                loss = criterion_train(logits.view(-1, logits.size(-1)), y.view(-1))
+                _, loss = model(x, y)
 
             loss = loss / grad_accum_steps
             loss_accum += loss.detach()
@@ -45,7 +44,7 @@ def train_one_step(model, train_iter, optimizer, scaler, criterion_train, args, 
 
 
 @torch.no_grad()
-def evaluate(model, loader, criterion, args, grad_accum_steps, step, val_steps):
+def evaluate(model, loader, args, grad_accum_steps, step, val_steps):
     model.eval()
     val_iter = iter(loader)
     val_loss_accum = torch.tensor(0.0, device=args.device)
@@ -55,8 +54,7 @@ def evaluate(model, loader, criterion, args, grad_accum_steps, step, val_steps):
         x, y = x.to(args.device), y.to(args.device)
 
         with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
-            logits = model(x)
-            loss = criterion(logits.view(-1, logits.size(-1)), y.view(-1))
+            _, loss = model(x, y)
         loss = loss / (val_steps * grad_accum_steps)
         val_loss_accum += loss.detach()
 

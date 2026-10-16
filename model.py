@@ -106,7 +106,7 @@ class Transformer(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx):
+    def forward(self, idx, targets=None):
         B, T = idx.size()
         assert T <= self.config.sequence_length, f"Cannot forward sequence of length {T}, block size is only {self.config.sequence_length}"
 
@@ -118,6 +118,10 @@ class Transformer(nn.Module):
         x = self.blocks(x)
         x = self.ln_f(x)
         logits = self.lm_head(x) # (B, T, vocab_size)
+
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+            return logits, loss
 
         return logits
 
