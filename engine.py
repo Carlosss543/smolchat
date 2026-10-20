@@ -6,8 +6,8 @@ import wandb
 
 
 def train_one_step(model, train_iter, optimizer, scaler, args, grad_accum_steps, step):
+    model.train()
     t0 = time.time()
-    
     loss_accum = torch.tensor(0.0, device=args.device)
 
     for micro_step in range(grad_accum_steps):

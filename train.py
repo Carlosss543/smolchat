@@ -25,12 +25,11 @@ def get_args_parser():
     parser.add_argument("--micro_batch_size", type=int, default=16)
 
     parser.add_argument("--max_steps", type=int, default=None)
-    parser.add_argument("--lr", type=float, default=6e-4)
-    parser.add_argument("--warmup_steps", type=int, default=715) # TRY TO REDUCE IT LATER
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--warmup_steps", type=int, default=200)
 
     parser.add_argument("--weight_decay", type=float, default=0.1)
 
-    parser.add_argument("--checkpoints_interval", type=int, default=1000)
     parser.add_argument("--resume_from_checkpoint", action="store_true")
     parser.add_argument("--wandb_run_id", type=str, default=None)
 
@@ -59,31 +58,10 @@ def main(args):
     hs_examples = list(load_dataset("Rowan/hellaswag", split="validation"))
 
 
-    # --- compute number of training steps ---
-    assert args.global_batch_size % (args.micro_batch_size * args.sequence_length * args.ddp_world_size) == 0, "Global batch size must be divisible by micro batch size * sequence length * number of distributed processes"
-    grad_accum_steps = args.global_batch_size // (args.micro_batch_size * args.sequence_length * args.ddp_world_size)
-
-    available_steps = len(train_loader) // grad_accum_steps
-    max_steps = min(args.max_steps, available_steps) if args.max_steps is not None else available_steps
-
-    starting_step = 0
-
-    if args.master_process:
-        print(f"max_steps = {max_steps}, grad_accum_steps = {grad_accum_steps}")
-
-
     # --- initialize model ---
-    model = smolTransformer(sequence_length=args.sequence_length).to(args.device)
+    base_model = smolTransformer(sequence_length=args.sequence_length).to(args.device)
 
-    if args.resume_from_checkpoint:
-        assert args.wandb_run_id is not None, "wandb_run_id must be specified when resuming from checkpoint."
-        assert os.path.exists(f"{args.output_dir}/{args.wandb_run_id}.pt"), f"Checkpoint path '{args.output_dir}/{args.wandb_run_id}.pt' does not exist."
-        checkpoint = torch.load(f"{args.output_dir}/{args.wandb_run_id}.pt", map_location=args.device)
-        model.load_state_dict(checkpoint["model_state_dict"])
-        if args.master_process:
-            print(f"Resumed training from checkpoint: {args.output_dir}/{args.wandb_run_id}.pt")
-
-    model = torch.compile(model)
+    model = torch.compile(base_model)
 
     if args.distributed:
         model = DDP(model, device_ids=[args.ddp_local_rank])
@@ -102,6 +80,17 @@ def main(args):
     )
 
     scaler = torch.amp.GradScaler("cuda")
+
+
+    # --- compute number of training steps ---
+    assert args.global_batch_size % (args.micro_batch_size * args.sequence_length * args.ddp_world_size) == 0, "Global batch size must be divisible by micro batch size * sequence length * number of distributed processes"
+    grad_accum_steps = args.global_batch_size // (args.micro_batch_size * args.sequence_length * args.ddp_world_size)
+
+    available_steps = len(train_loader) // grad_accum_steps
+    max_steps = min(args.max_steps, available_steps) if args.max_steps is not None else available_steps
+
+    if args.master_process:
+        print(f"max_steps = {max_steps}, grad_accum_steps = {grad_accum_steps}")
 
 
     # --- learning rate scheduler with warmup and cosine decay ---
@@ -124,12 +113,22 @@ def main(args):
 
 
     # --- resume optimizer, lr_scheduler, and scaler ---
+    starting_step = 0
+
     if args.resume_from_checkpoint:
+        assert args.wandb_run_id is not None, "wandb_run_id must be specified when resuming from checkpoint."
+        assert os.path.exists(f"{args.output_dir}/{args.wandb_run_id}.pt"), f"Checkpoint path '{args.output_dir}/{args.wandb_run_id}.pt' does not exist."
+
+        checkpoint = torch.load(f"{args.output_dir}/{args.wandb_run_id}.pt", map_location=args.device)
+        base_model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         lr_scheduler.load_state_dict(checkpoint["lr_scheduler_state_dict"])
         scaler.load_state_dict(checkpoint["scaler_state_dict"])
         starting_step = checkpoint["step"] + 1
         del checkpoint # free up memory
+
+        if args.master_process:
+            print(f"Resumed training from checkpoint: {args.output_dir}/{args.wandb_run_id}.pt")
 
 
     # --- initialize wandb ---
@@ -149,12 +148,10 @@ def main(args):
 
 
     # --- training loop (we do at most one epoch) ---
-    model.train()
     train_iter = iter(train_loader)
 
-    # skip batches if resuming from a checkpoint
     batches_to_skip = starting_step * grad_accum_steps
-    for _ in range(batches_to_skip):
+    for _ in range(batches_to_skip): # skip batches if resuming from a checkpoint
         next(train_iter)
 
     for step in range(starting_step, max_steps):
@@ -165,9 +162,8 @@ def main(args):
             evaluate(model, val_loader, args, grad_accum_steps, step=step, val_steps=1)
             generate(model, tokenizer, "France is", args, num_examples=1, max_new_tokens=30, temperature=1.0)
             eval_hellaswag(model, tokenizer, args, hs_examples, step=step)
-            model.train()
 
-        if ((step+1) % args.checkpoints_interval == 0 or step == max_steps - 1) and args.master_process:
+        if ((step+1) % 500 == 0 or step == max_steps - 1) and args.master_process:
             model_to_save = model.module if hasattr(model, "module") else model # Unwrap the model if it's wrapped by DDP
             model_to_save = model_to_save._orig_mod if hasattr(model_to_save, "_orig_mod") else model_to_save # Unwrap the model if it's wrapped by torch.compile
             checkpoint = {
