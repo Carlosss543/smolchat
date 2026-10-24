@@ -48,14 +48,13 @@ class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.up_proj = nn.Linear(config.embed_dim, 4 * config.embed_dim)
-        self.activation = nn.GELU(approximate="tanh")
         self.down_proj = nn.Linear(4 * config.embed_dim, config.embed_dim)
 
         self.down_proj.NANOGPT_SCALE_INIT = 1 # flag this layer for special initialization scaling
 
     def forward(self, x):
         x = self.up_proj(x)
-        x = self.activation(x)
+        x = F.relu(x).square()
         x = self.down_proj(x)
         return x
 

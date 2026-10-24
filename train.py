@@ -143,7 +143,7 @@ def main(args):
             resume="must" if args.resume_from_checkpoint else False
         )
         wandb.define_metric("step")
-        for metric in ("train_loss", "val_loss", "lr", "grad_norm", "tokens_per_sec"):
+        for metric in ("train_loss", "val_loss", "hellaswag_acc", "lr", "grad_norm", "tokens_per_sec"):
             wandb.define_metric(metric, step_metric="step")
 
 
@@ -175,7 +175,7 @@ def main(args):
                 "args": config
             }
             os.makedirs(args.output_dir, exist_ok=True)
-            torch.save(checkpoint, os.path.join(args.output_dir, f"{run.id}.pt"))
+            torch.save(checkpoint, f"{args.output_dir}/{run.id}.pt")
 
     if args.distributed:
         dist.destroy_process_group()
