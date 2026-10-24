@@ -13,6 +13,30 @@ class Config:
     vocab_size: int = 50304 # 50,000 BPE merges + 256 bytes tokens + 1 <|endoftext|> token = 50257 tokens but we use 50304 because it slightly speeds up training (contains more powers of two)
 
 
+class RotaryEmbedding(nn.Module):
+
+    def __init__(self, head_dim, max_sequence_length, base=10000):
+        super().__init__()
+        assert head_dim % 2 == 0, "Head dimension must be even for RoPE"
+        inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2).float() / head_dim))
+        positions = torch.arange(max_sequence_length, dtype=inv_freq.dtype)
+        angles = torch.outer(positions, inv_freq)
+        self.register_buffer("cos_cached", angles.cos()[None, None, :, :], persistent=False) # persistent=False means this buffer won't be saved in the state dict
+        self.register_buffer("sin_cached", angles.sin()[None, None, :, :], persistent=False)
+
+    def forward(self, sequence_length):
+        assert 0 <= sequence_length <= self.cos_cached.size(2), "Sequence length exceeds RoPE cache bounds"
+        return self.cos_cached[:, :, :sequence_length, :], self.sin_cached[:, :, :sequence_length, :]
+
+
+def apply_rotary_embedding(x, cos_sin):
+    x_even = x[..., 0::2]
+    x_odd = x[..., 1::2]
+    cos, sin = cos_sin
+    cos, sin = cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+    return torch.stack((x_even * cos - x_odd * sin, x_even * sin + x_odd * cos), dim=-1).flatten(-2)
+
+
 class CausalSelfAttention(nn.Module):
 
     def __init__(self, config):
@@ -27,7 +51,7 @@ class CausalSelfAttention(nn.Module):
 
         self.output_proj.NANOGPT_SCALE_INIT = 1 # flag this layer for special initialization scaling
 
-    def forward(self, x):
+    def forward(self, x, cos_sin):
         B, T, C = x.size()
 
         qkv = self.qkv_proj(x)
@@ -35,6 +59,9 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2) # (B, T, C) -> (B, num_heads, T, C // num_heads)
         q = q.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2)
         v = v.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2)
+
+        q = apply_rotary_embedding(q, cos_sin)
+        k = apply_rotary_embedding(k, cos_sin)
 
         attn = F.scaled_dot_product_attention(q, k, v, is_causal=True) # (B, num_heads, T, C // num_heads)
         attn = attn.transpose(1, 2).contiguous().view(B, T, C) # (B, T, C)
@@ -68,8 +95,8 @@ class Block(nn.Module):
         self.rms_2 = nn.RMSNorm(config.embed_dim)
         self.mlp = MLP(config)
 
-    def forward(self, x):
-        x = x + self.attn(self.rms_1(x))
+    def forward(self, x, cos_sin):
+        x = x + self.attn(self.rms_1(x), cos_sin)
         x = x + self.mlp(self.rms_2(x))
         return x
 
@@ -82,9 +109,9 @@ class Transformer(nn.Module):
         self.config = config
 
         self.wte = nn.Embedding(config.vocab_size, config.embed_dim)
-        self.wpe = nn.Embedding(config.sequence_length, config.embed_dim)
+        self.rotary_emb = RotaryEmbedding(config.embed_dim // config.num_heads, config.sequence_length)
 
-        self.blocks = nn.Sequential(*[Block(config) for _ in range(config.num_layers)])
+        self.blocks = nn.ModuleList([Block(config) for _ in range(config.num_layers)])
 
         self.rms_f = nn.RMSNorm(config.embed_dim)
         self.lm_head = nn.Linear(config.embed_dim, config.vocab_size, bias=False)
@@ -109,12 +136,12 @@ class Transformer(nn.Module):
         B, T = idx.size()
         assert T <= self.config.sequence_length, f"Cannot forward sequence of length {T}, block size is only {self.config.sequence_length}"
 
-        pos = torch.arange(0, T, dtype=torch.long, device=idx.device) # shape (T)
-        pos_emb = self.wpe(pos) # position embeddings of shape (T, embed_dim)
-        tok_emb = self.wte(idx) # token embeddings of shape (B, T, embed_dim)
-        x = tok_emb + pos_emb
+        x = self.wte(idx)
+        cos_sin = self.rotary_emb(T)
 
-        x = self.blocks(x)
+        for block in self.blocks:
+            x = block(x, cos_sin)
+
         x = self.rms_f(x)
         logits = self.lm_head(x) # (B, T, vocab_size)
 
