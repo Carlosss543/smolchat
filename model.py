@@ -63,14 +63,14 @@ class Block(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.ln_1 = nn.LayerNorm(config.embed_dim)
+        self.rms_1 = nn.RMSNorm(config.embed_dim)
         self.attn = CausalSelfAttention(config)
-        self.ln_2 = nn.LayerNorm(config.embed_dim)
+        self.rms_2 = nn.RMSNorm(config.embed_dim)
         self.mlp = MLP(config)
 
     def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
+        x = x + self.attn(self.rms_1(x))
+        x = x + self.mlp(self.rms_2(x))
         return x
 
 
@@ -86,7 +86,7 @@ class Transformer(nn.Module):
 
         self.blocks = nn.Sequential(*[Block(config) for _ in range(config.num_layers)])
 
-        self.ln_f = nn.LayerNorm(config.embed_dim)
+        self.rms_f = nn.RMSNorm(config.embed_dim)
         self.lm_head = nn.Linear(config.embed_dim, config.vocab_size, bias=False)
 
         self.lm_head.weight = self.wte.weight # weight sharing scheme
@@ -115,7 +115,7 @@ class Transformer(nn.Module):
         x = tok_emb + pos_emb
 
         x = self.blocks(x)
-        x = self.ln_f(x)
+        x = self.rms_f(x)
         logits = self.lm_head(x) # (B, T, vocab_size)
 
         if targets is not None:
