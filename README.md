@@ -21,19 +21,10 @@ Here are two sample continuations:
 
 The sentences produced look somewhat plausible and reflect a certain understanding of the world, but the content is often inaccurate or inconsistent.
 
-
 ## Requirements
 
-- Python 3.11 or later
-- An NVIDIA GPU compatible with CUDA
-- A Weights & Biases (W&B) account for online experiment tracking
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install numpy tiktoken datasets tqdm wandb torch
-```
+- CUDA-compatible NVIDIA GPU
+- Weights & Biases account
 
 ## Prepare the data
 
@@ -52,7 +43,7 @@ memory. The output consists of `train_*.npy` and `val_*.npy` shards, which are
 read directly by the data loader. To use a different location, change
 `out_dir` in `fineweb.py` and pass the same path to `--data_dir` when training.
 
-## Train
+## Training
 
 Example command to train on two GPUs:
 
