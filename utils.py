@@ -26,7 +26,7 @@ def init_distributed_mode(args):
 
 
 @torch.no_grad()
-def generate(model, enc, prompt, args, num_examples=1, max_new_tokens=100, temperature=1.0, top_k=50):
+def generate(args, model, enc, prompt, num_examples=1, max_new_tokens=100, temperature=1.0, top_k=50):
     model.eval()
     ids = torch.tensor([enc.encode_ordinary(prompt)], device=args.device).repeat(num_examples, 1)
 
@@ -51,7 +51,7 @@ def generate(model, enc, prompt, args, num_examples=1, max_new_tokens=100, tempe
 
 
 @torch.no_grad()
-def eval_hellaswag(model, tokenizer, args, examples, step, num_examples_used=None):
+def eval_hellaswag(args, model, tokenizer, examples, step, num_examples_used=None):
     model.eval()
 
     correct = torch.tensor(0, device=args.device)

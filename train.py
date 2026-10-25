@@ -66,8 +66,7 @@ def main(args):
     if args.distributed:
         model = DDP(model, device_ids=[args.ddp_local_rank])
 
-    if args.master_process:
-        print(f"Number of model parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.4f}M")
+    args.num_model_parameters = sum(p.numel() for p in model.parameters())
 
 
     # --- optimizer and gradient scaler for fp16 ---
@@ -84,13 +83,10 @@ def main(args):
 
     # --- compute number of training steps ---
     assert args.global_batch_size % (args.micro_batch_size * args.sequence_length * args.ddp_world_size) == 0, "Global batch size must be divisible by micro batch size * sequence length * number of distributed processes"
-    grad_accum_steps = args.global_batch_size // (args.micro_batch_size * args.sequence_length * args.ddp_world_size)
+    args.grad_accum_steps = args.global_batch_size // (args.micro_batch_size * args.sequence_length * args.ddp_world_size)
 
-    available_steps = len(train_loader) // grad_accum_steps
-    max_steps = min(args.max_steps, available_steps) if args.max_steps is not None else available_steps
-
-    if args.master_process:
-        print(f"max_steps = {max_steps}, grad_accum_steps = {grad_accum_steps}")
+    available_steps = len(train_loader) // args.grad_accum_steps
+    args.max_steps = min(args.max_steps, available_steps) if args.max_steps is not None else available_steps
 
 
     # --- learning rate scheduler with warmup and cosine decay ---
@@ -101,11 +97,11 @@ def main(args):
         if step < args.warmup_steps:
             return (step + 1) / args.warmup_steps
 
-        elif step >= max_steps:
+        elif step >= args.max_steps:
             return min_lr / max_lr
 
         else:
-            decay_ratio = (step - args.warmup_steps) / (max_steps - args.warmup_steps)
+            decay_ratio = (step - args.warmup_steps) / (args.max_steps - args.warmup_steps)
             coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
             return (min_lr + coeff * (max_lr - min_lr)) / max_lr
 
@@ -150,20 +146,20 @@ def main(args):
     # --- training loop (we do at most one epoch) ---
     train_iter = iter(train_loader)
 
-    batches_to_skip = starting_step * grad_accum_steps
+    batches_to_skip = starting_step * args.grad_accum_steps
     for _ in range(batches_to_skip): # skip batches if resuming from a checkpoint
         next(train_iter)
 
-    for step in range(starting_step, max_steps):
-        train_one_step(model, train_iter, optimizer, scaler, args, grad_accum_steps, step)
+    for step in range(starting_step, args.max_steps):
+        train_one_step(args, model, train_iter, optimizer, scaler, step)
         lr_scheduler.step()
 
-        if (step+1) % 200 == 0 or step == max_steps - 1:
-            evaluate(model, val_loader, args, grad_accum_steps, step=step, val_steps=1)
-            generate(model, tokenizer, "France is", args, num_examples=1, max_new_tokens=30, temperature=1.0)
-            eval_hellaswag(model, tokenizer, args, hs_examples, step=step)
+        if (step+1) % 200 == 0 or step == args.max_steps - 1:
+            evaluate(args, model, val_loader, step, val_steps=1)
+            generate(args, model, tokenizer, "France is", num_examples=1, max_new_tokens=30, temperature=1.0)
+            eval_hellaswag(args, model, tokenizer, hs_examples, step)
 
-        if ((step+1) % 500 == 0 or step == max_steps - 1) and args.master_process:
+        if ((step+1) % 500 == 0 or step == args.max_steps - 1) and args.master_process:
             model_to_save = model.module if hasattr(model, "module") else model # Unwrap the model if it's wrapped by DDP
             model_to_save = model_to_save._orig_mod if hasattr(model_to_save, "_orig_mod") else model_to_save # Unwrap the model if it's wrapped by torch.compile
             checkpoint = {
