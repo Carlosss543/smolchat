@@ -12,12 +12,15 @@ Here are two sample continuations:
 
 **Sample 1**
 
-> France is a member of the International Labour Organisation (ILO), and the international Union for the International Reduction of Injuries from Wounds and Illnesses.
-
+> France is already leading the way by having a fully fledged European state set up in Italy. This new constitution will help to create a stable centralised polity
 
 **Sample 2**
 
-> France is a member of the International Committee of the Red Cross (ICRC). “The World Health Organization is proud to celebrate International Women’s Health
+> France is divided into 10 regions. As such, any major regional political change and event would have had to go through several stages to get to a region with the
+
+**Sample 3**
+
+> France is already home to the largest collection of Mexican-built buildings in the world. At the end of 2011, the first of nine sites – including both the
 
 The sentences produced look somewhat plausible and reflect a certain understanding of the world, but the content is often inaccurate or inconsistent.
 
