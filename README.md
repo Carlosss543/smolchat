@@ -52,8 +52,7 @@ Example command to train on two GPUs:
 
 ```bash
 torchrun --nproc_per_node=2 train.py \
-  --data_dir ~/datasets/edu_fineweb10B/ \
-  --output_dir ./pretraining_checkpoints/
+  --data_dir ~/datasets/edu_fineweb10B/
 ```
 
 The script trains on the `train` shards, uses the
@@ -86,7 +85,6 @@ To resume training, provide the W&B run ID associated with the checkpoint:
 ```bash
 torchrun --standalone --nproc_per_node=2 train.py \
   --data_dir ~/datasets/edu_fineweb10B/ \
-  --output_dir ./pretraining_checkpoints/ \
   --resume_from_checkpoint \
   --wandb_run_id YOUR_WANDB_RUN_ID
 ```

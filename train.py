@@ -17,7 +17,7 @@ def get_args_parser():
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--data_dir", type=str, required=True)
-    parser.add_argument("--output_dir", type=str, required=True)
+    parser.add_argument("--output_dir", type=str, default="./pretraining_checkpoints/")
 
     parser.add_argument("--sequence_length", type=int, default=1024)
 
