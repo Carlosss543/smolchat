@@ -25,6 +25,12 @@ def init_distributed_mode(args):
         args.device = torch.device("cuda")
 
 
+def token_byte_lengths(tokenizer, device):
+    """UTF-8 byte length of each token in the vocab, used to convert the cross-entropy (nats/token) into bits-per-byte (tokenizer-independent)."""
+    lengths = [len(tokenizer.decode_single_token_bytes(t)) for t in range(tokenizer.n_vocab)]
+    return torch.tensor(lengths, dtype=torch.float32, device=device)
+
+
 @torch.no_grad()
 def generate(args, model, enc, prompt, num_examples=1, max_new_tokens=100, temperature=1.0, top_k=50):
     model.eval()

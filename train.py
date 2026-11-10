@@ -3,7 +3,7 @@ import argparse
 from model import smolTransformer
 from data import make_loader
 import math
-from utils import init_distributed_mode, generate, eval_hellaswag
+from utils import init_distributed_mode, generate, eval_hellaswag, token_byte_lengths
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 from engine import train_one_step, evaluate
@@ -54,6 +54,7 @@ def main(args):
     val_loader, _ = make_loader(path_to_dir=args.data_dir, split="val", batch_size=args.micro_batch_size, sequence_length=args.sequence_length, distributed=args.distributed, rank=args.ddp_rank, world_size=args.ddp_world_size)
 
     tokenizer = tiktoken.get_encoding("gpt2")
+    token_bytes = token_byte_lengths(tokenizer, args.device) # token_id -> UTF-8 byte length, for bits-per-byte
 
     hs_examples = list(load_dataset("Rowan/hellaswag", split="validation"))
 
@@ -129,17 +130,15 @@ def main(args):
 
     # --- initialize wandb ---
     if args.master_process:
-        config = {k: v for k, v in vars(args).items() if not k.startswith("_")}
         run = wandb.init(
             project="smolchat",
-            dir="./wandb_logs",
-            config=config,
+            config=vars(args),
             mode="online",
             id=args.wandb_run_id if args.resume_from_checkpoint else None,
             resume="must" if args.resume_from_checkpoint else False
         )
         wandb.define_metric("step")
-        for metric in ("train_loss", "val_loss", "hellaswag_acc", "lr", "grad_norm", "tokens_per_sec"):
+        for metric in ("train_loss", "train_bpb", "val_loss", "val_bpb", "hellaswag_acc", "lr", "grad_norm", "tokens_per_sec"):
             wandb.define_metric(metric, step_metric="step")
 
 
@@ -151,11 +150,11 @@ def main(args):
         next(train_iter)
 
     for step in range(starting_step, args.max_steps):
-        train_one_step(args, model, train_iter, optimizer, scaler, step)
+        train_one_step(args, model, train_iter, optimizer, scaler, token_bytes, step)
         lr_scheduler.step()
 
         if (step+1) % 200 == 0 or step == args.max_steps - 1:
-            evaluate(args, model, val_loader, step, val_steps=1)
+            evaluate(args, model, val_loader, token_bytes, step, val_steps=1)
             generate(args, model, tokenizer, "France is", num_examples=1, max_new_tokens=30, temperature=1.0)
             eval_hellaswag(args, model, tokenizer, hs_examples, step)
 
@@ -168,7 +167,7 @@ def main(args):
                 "optimizer_state_dict": optimizer.state_dict(),
                 "lr_scheduler_state_dict": lr_scheduler.state_dict(),
                 "scaler_state_dict": scaler.state_dict(),
-                "args": config
+                "args": vars(args)
             }
             os.makedirs(args.output_dir, exist_ok=True)
             torch.save(checkpoint, f"{args.output_dir}/{run.id}.pt")
